@@ -1,11 +1,16 @@
 import { useEffect, useState } from "react";
 import { supabase } from "./supabase";
-import { PROVAS, TABELA_INI, TAXAS_INI, avaliar, relatorio, fmt, hoje, corNivel, toAval } from "./calc";
+import { avaliar, relatorio, fmt, hoje, corNivel, unid } from "./calc";
 
 const inp = "w-full border rounded-lg px-3 py-2 focus:outline-none focus:ring-2 focus:ring-blue-500";
 const btn = "bg-blue-700 text-white px-4 py-2 rounded-lg font-semibold";
 const barCor = (v) => (v >= 100 ? "bg-green-600" : v >= 75 ? "bg-yellow-500" : "bg-red-500");
 const Card = ({ children }) => <div className="bg-white rounded-xl shadow p-4">{children}</div>;
+const useAviso = () => {
+  const [msg, setMsg] = useState("");
+  return [msg, (t) => { setMsg(t); setTimeout(() => setMsg(""), 3000); }];
+};
+const Aviso = ({ msg }) => msg ? <p className="bg-blue-100 text-blue-900 text-sm rounded-lg p-2">{msg}</p> : null;
 
 function Tela({ children, sair }) {
   return (
@@ -22,7 +27,8 @@ function Tela({ children, sair }) {
 export default function App() {
   const [session, setSession] = useState(undefined);
   const [perfil, setPerfil] = useState(null);
-  const [cfg, setCfg] = useState({ tabela: TABELA_INI, taxas: TAXAS_INI, fator: 30 });
+  const [concursos, setConcursos] = useState([]);
+  const [fator, setFator] = useState(30);
 
   useEffect(() => {
     supabase.auth.getSession().then(({ data }) => setSession(data.session));
@@ -33,24 +39,25 @@ export default function App() {
   useEffect(() => {
     if (!session) return setPerfil(null);
     supabase.from("profiles").select("*").eq("id", session.user.id).single().then(({ data }) => setPerfil(data));
-    supabase.from("config").select("*").eq("id", 1).single().then(({ data }) => data && setCfg({
-      tabela: data.tabela || TABELA_INI, taxas: data.taxas || TAXAS_INI, fator: Number(data.fator) || 30 }));
+    supabase.from("concursos").select("*").order("ordem").then(({ data }) => setConcursos(data || []));
+    supabase.from("config").select("fator").eq("id", 1).single().then(({ data }) => setFator(Number(data?.fator) || 30));
   }, [session]);
 
   if (session === undefined) return <Tela><p>Carregando…</p></Tela>;
   if (!session) return <Entrada />;
   if (!perfil) return <Tela sair><p>Carregando perfil…</p></Tela>;
-  return perfil.is_admin ? <Admin cfg={cfg} setCfg={setCfg} /> : <Aluno perfil={perfil} cfg={cfg} />;
+  return perfil.is_admin
+    ? <Admin concursos={concursos} setConcursos={setConcursos} fator={fator} setFator={setFator} />
+    : <Aluno perfil={perfil} concursos={concursos} fator={fator} />;
 }
 
-/* ---------- ENTRADA (público) ---------- */
+/* ---------- ENTRADA ---------- */
 function Entrada() {
   const [nomes, setNomes] = useState([]);
   const [modo, setModo] = useState("login");
   const [msg, setMsg] = useState("");
-  const [f, setF] = useState({ email: "", senha: "", nome: "", sexo: "M", idade: "", freq: 3, concurso: "" });
+  const [f, setF] = useState({ email: "", senha: "", nome: "", sexo: "M", idade: "", freq: 3 });
   const set = (k, v) => setF({ ...f, [k]: v });
-
   useEffect(() => { supabase.rpc("lista_alunos").then(({ data }) => setNomes(data || [])); }, []);
 
   const enviar = async () => {
@@ -64,7 +71,7 @@ function Entrada() {
     if (f.senha.length < 6) return setMsg("A senha precisa ter ao menos 6 caracteres.");
     const { data, error } = await supabase.auth.signUp({
       email: f.email, password: f.senha,
-      options: { data: { nome: f.nome, sexo: f.sexo, idade: f.idade || "", freq: String(f.freq), concurso: f.concurso || "" } },
+      options: { data: { nome: f.nome, sexo: f.sexo, idade: f.idade || "", freq: String(f.freq) } },
     });
     if (error) return setMsg(error.message);
     if (!data.session) setMsg("Cadastro feito! Confirme pelo link enviado ao seu e-mail e depois entre.");
@@ -84,11 +91,10 @@ function Entrada() {
           {modo === "cadastro" && (
             <>
               <input className={inp} placeholder="Nome completo" value={f.nome} onChange={(e) => set("nome", e.target.value)} />
-              <div className="grid grid-cols-2 gap-2">
+              <div className="grid grid-cols-3 gap-2">
                 <select className={inp} value={f.sexo} onChange={(e) => set("sexo", e.target.value)}><option value="M">Masculino</option><option value="F">Feminino</option></select>
                 <input type="number" className={inp} placeholder="Idade" value={f.idade} onChange={(e) => set("idade", e.target.value)} />
-                <select className={inp} value={f.freq} onChange={(e) => set("freq", e.target.value)}>{[2, 3, 4, 5].map((n) => <option key={n} value={n}>{n}x por semana</option>)}</select>
-                <div><label className="text-xs text-slate-500">Data do concurso</label><input type="date" className={inp} value={f.concurso} onChange={(e) => set("concurso", e.target.value)} /></div>
+                <select className={inp} value={f.freq} onChange={(e) => set("freq", e.target.value)}>{[2, 3, 4, 5].map((n) => <option key={n} value={n}>{n}x/sem</option>)}</select>
               </div>
             </>
           )}
@@ -106,7 +112,7 @@ function Entrada() {
   );
 }
 
-/* ---------- RESULTADO ---------- */
+/* ---------- GRÁFICO E RESULTADO ---------- */
 function Grafico({ vals, min }) {
   if (vals.length < 2) return null;
   const W = 260, H = 60, top = Math.max(...vals, min) * 1.1 || 1;
@@ -121,28 +127,27 @@ function Grafico({ vals, min }) {
   );
 }
 
-function Resultado({ aluno, cfg, onRemover }) {
+function Resultado({ aluno, conc, avals, fator, dataProva, admin, onRemover, onConferir }) {
   const [ok, setOk] = useState("");
-  if (!aluno.avals.length) return <Card><p className="text-slate-600">Aguardando a primeira avaliação com o treinador.</p></Card>;
-  const r = avaliar(aluno, cfg.tabela, cfg.taxas, cfg.fator);
-  const txt = relatorio(aluno, r);
+  if (!conc.provas?.length) return <Card><p className="text-slate-600">Este concurso ainda não tem provas cadastradas pelo treinador.</p></Card>;
+  const r = avaliar(aluno, conc, avals, fator, dataProva);
+  if (!r) return <Card><p className="text-slate-600">Nenhum resultado ainda. Toque em <b>+ Lançar resultado</b>.</p></Card>;
+  const txt = relatorio(aluno, conc, r, dataProva);
   const copiar = () => navigator.clipboard?.writeText(txt).then(() => { setOk("Copiado!"); setTimeout(() => setOk(""), 2000); });
 
   return (
     <>
       <Card>
-        <h2 className="text-lg font-bold">{aluno.nome}</h2>
-        <p className="text-sm text-slate-500 mb-3">{aluno.sexo === "M" ? "Masculino" : "Feminino"} · {aluno.freq}x/sem · Última avaliação {fmt(r.ult.data)}</p>
         <div className="grid grid-cols-2 sm:grid-cols-4 gap-3 text-center">
           <div className={`${corNivel[r.nivel]} text-white rounded-lg p-3`}><p className="text-xs">Nível</p><p className="font-bold">{r.nivel}</p></div>
           <div className="bg-blue-50 rounded-lg p-3"><p className="text-xs">% do mínimo</p><p className="text-xl font-bold text-blue-800">{r.pctGeral}%</p></div>
-          <div className="bg-slate-100 rounded-lg p-3"><p className="text-xs">Pontuação</p><p className="text-xl font-bold">{r.pontos}/25</p></div>
+          <div className="bg-slate-100 rounded-lg p-3"><p className="text-xs">Pontuação</p><p className="text-xl font-bold">{r.pontos}/{r.pontosMax}</p></div>
           <div className="bg-slate-100 rounded-lg p-3"><p className="text-xs">Prazo p/ aprovar</p><p className="text-xl font-bold">{r.prazo === 0 ? "Apto" : `${r.prazo} sem`}</p>
             {r.prazo > 0 && <p className="text-xs text-slate-500">até {r.dataAprov.toLocaleDateString("pt-BR")}</p>}</div>
         </div>
         {r.diasConcurso !== null && (
           <p className={`mt-3 rounded-lg p-3 text-sm ${r.atraso ? "bg-red-50 text-red-800" : "bg-green-50 text-green-800"}`}>
-            📅 Concurso em <b>{r.diasConcurso} dias</b> ({fmt(aluno.concurso)}). {r.atraso ? "⚠ A previsão passa da data do concurso." : "Previsão dentro do prazo."}
+            📅 Prova em <b>{r.diasConcurso} dias</b> ({fmt(dataProva)}). {r.atraso ? "⚠ A previsão passa da data da prova." : "Previsão dentro do prazo."}
           </p>
         )}
       </Card>
@@ -172,11 +177,17 @@ function Resultado({ aluno, cfg, onRemover }) {
         <h3 className="font-semibold mb-2">Histórico</h3>
         <div className="overflow-x-auto">
           <table className="w-full text-sm">
-            <thead><tr className="bg-slate-100"><th className="p-2 text-left">Data</th>{PROVAS.map((p) => <th key={p.k} className="p-2">{p.nome}</th>)}{onRemover && <th />}</tr></thead>
+            <thead><tr className="bg-slate-100"><th className="p-2 text-left">Data</th>{conc.provas.map((p) => <th key={p.k} className="p-2">{p.nome}</th>)}<th className="p-2">Status</th><th /></tr></thead>
             <tbody>{r.avs.map((a) => (
               <tr key={a.id} className="border-b text-center">
-                <td className="p-2 text-left">{fmt(a.data)}</td>{PROVAS.map((p) => <td key={p.k} className="p-2">{a[p.k]}</td>)}
-                {onRemover && <td><button className="text-red-600 text-xs" onClick={() => onRemover(a.id)}>remover</button></td>}
+                <td className="p-2 text-left">{fmt(a.data)}</td>
+                {conc.provas.map((p) => <td key={p.k} className="p-2">{a.valores?.[p.k] ?? "-"}</td>)}
+                <td className="p-2">
+                  {admin
+                    ? <button onClick={() => onConferir(a.id, !a.conferido)} className={`text-xs px-2 py-1 rounded ${a.conferido ? "bg-green-600 text-white" : "border border-orange-500 text-orange-600"}`}>{a.conferido ? "✓ conferido" : "conferir"}</button>
+                    : <span className={`text-xs ${a.conferido ? "text-green-700" : "text-orange-600"}`}>{a.conferido ? "✓ conferido" : "pendente"}</span>}
+                </td>
+                <td><button className="text-red-600 text-xs" onClick={() => onRemover(a.id)}>remover</button></td>
               </tr>
             ))}</tbody>
           </table>
@@ -192,52 +203,143 @@ function Resultado({ aluno, cfg, onRemover }) {
   );
 }
 
+/* ---------- PAINEL (aluno e treinador) ---------- */
+function Painel({ aluno, inscr, avals, concursos, fator, admin, reload }) {
+  const [sel, setSel] = useState(inscr[0]?.concurso_id || null);
+  const [novo, setNovo] = useState({ concurso_id: "", data_prova: "" });
+  const [form, setForm] = useState(null);
+  const [msg, aviso] = useAviso();
+
+  useEffect(() => { if (!inscr.some((i) => i.concurso_id === sel)) setSel(inscr[0]?.concurso_id || null); }, [inscr]);
+
+  const disp = concursos.filter((c) => !inscr.some((i) => i.concurso_id === c.id));
+  const conc = concursos.find((c) => c.id === sel);
+  const ins = inscr.find((i) => i.concurso_id === sel);
+  const nomeConc = (id) => concursos.find((c) => c.id === id)?.nome || id;
+
+  const salvarPerfil = async (campos) => { await supabase.from("profiles").update(campos).eq("id", aluno.id); reload(); };
+  const inscrever = async () => {
+    if (!novo.concurso_id) return aviso("Escolha o concurso.");
+    const { error } = await supabase.from("inscricoes").insert({ aluno_id: aluno.id, concurso_id: novo.concurso_id, data_prova: novo.data_prova || null });
+    if (error) return aviso("Erro: " + error.message);
+    setSel(novo.concurso_id); setNovo({ concurso_id: "", data_prova: "" }); reload();
+  };
+  const mudarData = async (d) => {
+    await supabase.from("inscricoes").update({ data_prova: d || null }).eq("aluno_id", aluno.id).eq("concurso_id", sel); reload();
+  };
+  const sairConc = async () => {
+    if (!confirm(`Remover ${conc.nome} e todos os resultados dele?`)) return;
+    await supabase.from("avaliacoes").delete().eq("aluno_id", aluno.id).eq("concurso_id", sel);
+    await supabase.from("inscricoes").delete().eq("aluno_id", aluno.id).eq("concurso_id", sel);
+    reload();
+  };
+  const salvarAval = async () => {
+    if (!form.data) return aviso("Informe a data do teste.");
+    const valores = {};
+    conc.provas.forEach((p) => (valores[p.k] = Number(form.v[p.k]) || 0));
+    const { error } = await supabase.from("avaliacoes").insert({ aluno_id: aluno.id, concurso_id: sel, data: form.data, valores });
+    if (error) return aviso("Erro: " + error.message);
+    setForm(null); reload(); aviso("Resultado salvo!");
+  };
+  const remover = async (id) => { if (!confirm("Remover esta avaliação?")) return; await supabase.from("avaliacoes").delete().eq("id", id); reload(); };
+  const conferir = async (id, v) => { await supabase.from("avaliacoes").update({ conferido: v }).eq("id", id); reload(); };
+
+  return (
+    <>
+      <Card>
+        <h2 className="text-lg font-bold">{aluno.nome}</h2>
+        <div className="grid grid-cols-2 gap-2 mt-2">
+          <select className={inp} value={aluno.sexo} onChange={(e) => salvarPerfil({ sexo: e.target.value })}><option value="M">Masculino</option><option value="F">Feminino</option></select>
+          <select className={inp} value={aluno.freq} onChange={(e) => salvarPerfil({ freq: Number(e.target.value) })}>{[2, 3, 4, 5].map((n) => <option key={n} value={n}>{n}x por semana</option>)}</select>
+        </div>
+      </Card>
+
+      <Card>
+        <h3 className="font-semibold mb-2">{admin ? "Concursos do aluno" : "Meus concursos"}</h3>
+        <div className="flex flex-wrap gap-2 mb-3">
+          {inscr.map((i) => (
+            <button key={i.concurso_id} onClick={() => { setSel(i.concurso_id); setForm(null); }}
+              className={`px-4 py-2 rounded-lg font-semibold ${sel === i.concurso_id ? "bg-blue-700 text-white" : "border"}`}>{nomeConc(i.concurso_id)}</button>
+          ))}
+          {!inscr.length && <p className="text-sm text-slate-500">Nenhum concurso ainda. Adicione abaixo.</p>}
+        </div>
+        {disp.length > 0 && (
+          <div className="grid sm:grid-cols-3 gap-2 border-t pt-3">
+            <select className={inp} value={novo.concurso_id} onChange={(e) => setNovo({ ...novo, concurso_id: e.target.value })}>
+              <option value="">+ Adicionar concurso…</option>{disp.map((c) => <option key={c.id} value={c.id}>{c.nome}</option>)}
+            </select>
+            <input type="date" className={inp} title="Data da prova" value={novo.data_prova} onChange={(e) => setNovo({ ...novo, data_prova: e.target.value })} />
+            <button onClick={inscrever} className={btn}>Adicionar</button>
+          </div>
+        )}
+        <Aviso msg={msg} />
+      </Card>
+
+      {conc && (
+        <>
+          <Card>
+            <div className="flex flex-wrap gap-2 items-end">
+              <div><label className="text-xs text-slate-500">Data da prova – {conc.nome}</label>
+                <input type="date" className={inp} value={ins?.data_prova || ""} onChange={(e) => mudarData(e.target.value)} /></div>
+              {conc.provas?.length > 0 && <button onClick={() => setForm({ data: hoje(), v: {} })} className="bg-green-700 text-white px-4 py-2 rounded-lg font-semibold">+ Lançar resultado</button>}
+              <button onClick={sairConc} className="text-red-600 text-sm ml-auto">Remover concurso</button>
+            </div>
+            {form && (
+              <div className="mt-4 border-t pt-4 grid sm:grid-cols-2 gap-3">
+                <div><label className="text-sm">Data do teste</label><input type="date" className={inp} value={form.data} onChange={(e) => setForm({ ...form, data: e.target.value })} /></div>
+                {conc.provas.map((p) => (
+                  <div key={p.k}><label className="text-sm">{p.nome} ({unid(p, aluno.sexo)}) — mín. {p[aluno.sexo]?.[0]}</label>
+                    <input type="number" inputMode="decimal" className={inp} value={form.v[p.k] ?? ""} onChange={(e) => setForm({ ...form, v: { ...form.v, [p.k]: e.target.value } })} /></div>
+                ))}
+                <div className="flex gap-2 sm:col-span-2"><button onClick={salvarAval} className={btn}>Salvar</button><button onClick={() => setForm(null)} className="border px-4 rounded-lg">Cancelar</button></div>
+              </div>
+            )}
+          </Card>
+          <Resultado aluno={aluno} conc={conc} avals={avals} fator={fator} dataProva={ins?.data_prova} admin={admin} onRemover={remover} onConferir={conferir} />
+        </>
+      )}
+    </>
+  );
+}
+
 /* ---------- ALUNO ---------- */
-function Aluno({ perfil, cfg }) {
-  const [avals, setAvals] = useState(null);
-  useEffect(() => {
-    supabase.from("avaliacoes").select("*").eq("aluno_id", perfil.id).then(({ data }) => setAvals((data || []).map(toAval)));
-  }, [perfil.id]);
-  return <Tela sair>{avals === null ? <p>Carregando…</p> : <Resultado aluno={{ ...perfil, avals }} cfg={cfg} />}</Tela>;
+function Aluno({ perfil, concursos, fator }) {
+  const [d, setD] = useState(null);
+  const carregar = async () => {
+    const [p, i, a] = await Promise.all([
+      supabase.from("profiles").select("*").eq("id", perfil.id).single(),
+      supabase.from("inscricoes").select("*").eq("aluno_id", perfil.id),
+      supabase.from("avaliacoes").select("*").eq("aluno_id", perfil.id),
+    ]);
+    setD({ aluno: p.data || perfil, inscr: i.data || [], avals: a.data || [] });
+  };
+  useEffect(() => { carregar(); }, [perfil.id]);
+  return <Tela sair>{!d ? <p>Carregando…</p> : <Painel {...d} concursos={concursos} fator={fator} reload={carregar} />}</Tela>;
 }
 
 /* ---------- TREINADOR ---------- */
-function Admin({ cfg, setCfg }) {
+function Admin({ concursos, setConcursos, fator, setFator }) {
   const [perfis, setPerfis] = useState([]);
+  const [inscr, setInscr] = useState([]);
   const [avs, setAvs] = useState([]);
   const [tela, setTela] = useState("lista");
   const [verId, setVerId] = useState(null);
-  const [form, setForm] = useState(null);
-  const [sexoTab, setSexoTab] = useState("M");
-  const [msg, setMsg] = useState("");
-  const aviso = (t) => { setMsg(t); setTimeout(() => setMsg(""), 3000); };
+  const [filtro, setFiltro] = useState("");
+  const [msg, aviso] = useAviso();
 
   const carregar = async () => {
-    const [p, a] = await Promise.all([
+    const [p, i, a] = await Promise.all([
       supabase.from("profiles").select("*").eq("is_admin", false).order("nome"),
+      supabase.from("inscricoes").select("*"),
       supabase.from("avaliacoes").select("*"),
     ]);
-    setPerfis(p.data || []); setAvs(a.data || []);
+    setPerfis(p.data || []); setInscr(i.data || []); setAvs(a.data || []);
   };
   useEffect(() => { carregar(); }, []);
 
-  const alunos = perfis.map((p) => ({ ...p, avals: avs.filter((v) => v.aluno_id === p.id).map(toAval) }));
-  const aluno = alunos.find((a) => a.id === verId);
-
-  const salvarAval = async () => {
-    const { error } = await supabase.from("avaliacoes").insert({
-      aluno_id: verId, data: form.data, corrida: form.corrida || 0, barra: form.barra || 0,
-      abdominal: form.abdominal || 0, meio_sugado: form.meioSugado || 0, natacao: form.natacao || 0,
-    });
-    if (error) return aviso("Erro ao salvar: " + error.message);
-    setForm(null); await carregar(); aviso("Avaliação salva!");
-  };
-  const removerAval = async (id) => { await supabase.from("avaliacoes").delete().eq("id", id); carregar(); };
-  const salvarPerfil = async (campos) => { await supabase.from("profiles").update(campos).eq("id", verId); carregar(); aviso("Dados atualizados."); };
-  const salvarCfg = async () => {
-    const { error } = await supabase.from("config").update({ tabela: cfg.tabela, taxas: cfg.taxas, fator: cfg.fator }).eq("id", 1);
-    aviso(error ? "Erro: " + error.message : "Índices salvos.");
-  };
+  const doAluno = (id) => ({ inscr: inscr.filter((x) => x.aluno_id === id), avals: avs.filter((x) => x.aluno_id === id) });
+  const lista = perfis.filter((p) => !filtro || inscr.some((i) => i.aluno_id === p.id && i.concurso_id === filtro));
+  const aluno = perfis.find((p) => p.id === verId);
 
   return (
     <Tela sair>
@@ -246,24 +348,33 @@ function Admin({ cfg, setCfg }) {
           <button key={t} onClick={() => { setTela(t); setVerId(null); }} className={`px-4 py-2 rounded-lg font-semibold ${tela === t ? "bg-blue-700 text-white" : "bg-white border"}`}>{l}</button>
         ))}
       </div>
-      {msg && <p className="bg-blue-100 text-blue-900 text-sm rounded-lg p-2">{msg}</p>}
+      <Aviso msg={msg} />
 
       {tela === "lista" && !aluno && (
         <Card>
-          <h2 className="text-lg font-bold mb-3">Alunos ({alunos.length})</h2>
+          <div className="flex flex-wrap justify-between items-center gap-2 mb-3">
+            <h2 className="text-lg font-bold">Alunos ({lista.length})</h2>
+            <select className="border rounded-lg px-3 py-2" value={filtro} onChange={(e) => setFiltro(e.target.value)}>
+              <option value="">Todos os concursos</option>{concursos.map((c) => <option key={c.id} value={c.id}>{c.nome}</option>)}
+            </select>
+          </div>
           <div className="space-y-2">
-            {alunos.map((a) => {
-              const r = a.avals.length ? avaliar(a, cfg.tabela, cfg.taxas, cfg.fator) : null;
+            {lista.map((a) => {
+              const d = doAluno(a.id);
+              const pend = d.avals.filter((v) => !v.conferido).length;
               return (
-                <button key={a.id} onClick={() => setVerId(a.id)} className="w-full text-left flex flex-wrap justify-between items-center gap-2 border rounded-lg p-3 hover:bg-slate-50">
-                  <div>
-                    <p className="font-semibold">{a.nome} {r?.atraso && <span className="text-red-600 text-xs">⚠ prazo após o concurso</span>}</p>
-                    <p className="text-xs text-slate-500">{a.sexo === "M" ? "Masc." : "Fem."} · {a.freq}x/sem · {a.avals.length} avaliação(ões)</p>
+                <button key={a.id} onClick={() => setVerId(a.id)} className="w-full text-left border rounded-lg p-3 hover:bg-slate-50">
+                  <p className="font-semibold">{a.nome} {pend > 0 && <span className="text-orange-600 text-xs">· {pend} para conferir</span>}</p>
+                  <p className="text-xs text-slate-500 mb-1">{a.sexo === "M" ? "Masc." : "Fem."} · {a.freq}x/sem</p>
+                  <div className="flex flex-wrap gap-1">
+                    {d.inscr.filter((i) => !filtro || i.concurso_id === filtro).map((i) => {
+                      const c = concursos.find((x) => x.id === i.concurso_id);
+                      const r = c && avaliar(a, c, d.avals, fator, i.data_prova);
+                      return <span key={i.concurso_id} className={`text-xs px-2 py-1 rounded text-white ${r ? corNivel[r.nivel] : "bg-slate-400"}`}>
+                        {c?.nome}: {r ? `${r.nivel} · ${r.pontos}/${r.pontosMax}` : "sem resultado"}{r?.atraso ? " ⚠" : ""}</span>;
+                    })}
+                    {!d.inscr.length && <span className="text-xs text-slate-400">Sem concurso</span>}
                   </div>
-                  {r ? <div className="flex gap-2 items-center">
-                    <span className={`text-white text-xs px-2 py-1 rounded ${corNivel[r.nivel]}`}>{r.nivel}</span>
-                    <span className="text-sm font-semibold">{r.pctGeral}%</span><span className="text-sm">{r.pontos}/25</span>
-                  </div> : <span className="text-xs text-orange-600">Sem avaliação</span>}
                 </button>
               );
             })}
@@ -274,60 +385,85 @@ function Admin({ cfg, setCfg }) {
       {tela === "lista" && aluno && (
         <>
           <button onClick={() => setVerId(null)} className="bg-white border px-4 py-2 rounded-lg">← Voltar</button>
-          <Card>
-            <h3 className="font-semibold mb-2">Dados do aluno</h3>
-            <div className="grid grid-cols-2 sm:grid-cols-4 gap-2">
-              <select className={inp} value={aluno.freq} onChange={(e) => salvarPerfil({ freq: Number(e.target.value) })}>{[2, 3, 4, 5].map((n) => <option key={n} value={n}>{n}x/sem</option>)}</select>
-              <select className={inp} value={aluno.sexo} onChange={(e) => salvarPerfil({ sexo: e.target.value })}><option value="M">Masculino</option><option value="F">Feminino</option></select>
-              <input type="date" className={inp} value={aluno.concurso || ""} onChange={(e) => salvarPerfil({ concurso: e.target.value || null })} />
-              <button onClick={() => setForm({ data: hoje(), corrida: "", barra: "", abdominal: "", meioSugado: "", natacao: "" })} className="bg-green-700 text-white rounded-lg font-semibold">+ Avaliação</button>
-            </div>
-            {form && (
-              <div className="mt-4 border-t pt-4 grid sm:grid-cols-2 gap-3">
-                <div><label className="text-sm">Data do teste</label><input type="date" className={inp} value={form.data} onChange={(e) => setForm({ ...form, data: e.target.value })} /></div>
-                {PROVAS.map((p) => (
-                  <div key={p.k}><label className="text-sm">{p.nome} ({p.un[aluno.sexo]}) — mín. {cfg.tabela[aluno.sexo][p.k][0]}</label>
-                    <input type="number" inputMode="numeric" className={inp} value={form[p.k]} onChange={(e) => setForm({ ...form, [p.k]: e.target.value })} /></div>
-                ))}
-                <div className="flex gap-2 sm:col-span-2"><button onClick={salvarAval} className={btn}>Salvar</button><button onClick={() => setForm(null)} className="border px-4 rounded-lg">Cancelar</button></div>
-              </div>
-            )}
-          </Card>
-          <Resultado aluno={aluno} cfg={cfg} onRemover={removerAval} />
+          <Painel aluno={aluno} {...doAluno(aluno.id)} concursos={concursos} fator={fator} admin reload={carregar} />
         </>
       )}
 
-      {tela === "indices" && (
-        <Card>
-          <div className="flex justify-between items-center mb-3">
-            <h2 className="text-lg font-bold">Tabela de pontos</h2>
-            <div className="flex gap-1">{["M", "F"].map((s) => <button key={s} onClick={() => setSexoTab(s)} className={`px-3 py-1 rounded ${sexoTab === s ? "bg-blue-700 text-white" : "border"}`}>{s}</button>)}</div>
+      {tela === "indices" && <Indices concursos={concursos} setConcursos={setConcursos} fator={fator} setFator={setFator} aviso={aviso} />}
+    </Tela>
+  );
+}
+
+/* ---------- ÍNDICES POR CONCURSO ---------- */
+function Indices({ concursos, setConcursos, fator, setFator, aviso }) {
+  const [sel, setSel] = useState(null);
+  const [sx, setSx] = useState("M");
+  const [novoNome, setNovoNome] = useState("");
+  const c = concursos.find((x) => x.id === sel) || concursos[0];
+
+  const upd = (campos) => setConcursos(concursos.map((x) => (x.id === c.id ? { ...x, ...campos } : x)));
+  const setP = (i, campos) => upd({ provas: c.provas.map((p, j) => (j === i ? { ...p, ...campos } : p)) });
+  const setNivel = (i, n, v) => { const arr = [...(c.provas[i][sx] || [0, 0, 0, 0, 0])]; arr[n] = Number(v); setP(i, { [sx]: arr }); };
+  const addProva = () => upd({ provas: [...c.provas, { k: "p" + Date.now(), nome: "Nova prova", un: "rep", M: [0, 0, 0, 0, 0], F: [0, 0, 0, 0, 0], taxa: 10 }] });
+
+  const salvar = async () => {
+    const { error } = await supabase.from("concursos").update({ nome: c.nome, provas: c.provas }).eq("id", c.id);
+    await supabase.from("config").update({ fator }).eq("id", 1);
+    aviso(error ? "Erro: " + error.message : `${c.nome} salvo.`);
+  };
+  const criar = async () => {
+    const nome = novoNome.trim();
+    const id = nome.toLowerCase().normalize("NFD").replace(/[^a-z0-9]/g, "");
+    if (!id) return aviso("Informe o nome do concurso.");
+    const { data, error } = await supabase.from("concursos").insert({ id, nome, provas: [], ordem: concursos.length + 1 }).select().single();
+    if (error) return aviso("Erro: " + error.message);
+    setConcursos([...concursos, data]); setSel(id); setNovoNome("");
+  };
+  const excluir = async () => {
+    if (!confirm(`Excluir ${c.nome}? Os resultados dos alunos nesse concurso serão apagados.`)) return;
+    await supabase.from("concursos").delete().eq("id", c.id);
+    setConcursos(concursos.filter((x) => x.id !== c.id)); setSel(null);
+  };
+
+  return (
+    <Card>
+      <div className="flex flex-wrap gap-2 mb-3">
+        {concursos.map((x) => <button key={x.id} onClick={() => setSel(x.id)} className={`px-3 py-1 rounded-lg font-semibold ${c?.id === x.id ? "bg-blue-700 text-white" : "border"}`}>{x.nome}</button>)}
+        <input className="border rounded-lg px-2 py-1 text-sm" placeholder="Novo concurso (ex.: PRF)" value={novoNome} onChange={(e) => setNovoNome(e.target.value)} />
+        <button onClick={criar} className="bg-green-700 text-white px-3 py-1 rounded-lg text-sm">+ Criar</button>
+      </div>
+      {c && (
+        <>
+          <div className="flex flex-wrap justify-between items-center gap-2 mb-3">
+            <input className="border rounded-lg px-2 py-1 font-bold" value={c.nome} onChange={(e) => upd({ nome: e.target.value })} />
+            <div className="flex gap-1">{["M", "F"].map((s) => <button key={s} onClick={() => setSx(s)} className={`px-3 py-1 rounded ${sx === s ? "bg-blue-700 text-white" : "border"}`}>{s === "M" ? "Masculino" : "Feminino"}</button>)}</div>
           </div>
           <div className="overflow-x-auto">
             <table className="w-full text-sm">
-              <thead><tr className="bg-slate-100"><th className="p-2 text-left">Prova</th>{[1, 2, 3, 4, 5].map((n) => <th key={n}>{n} pt</th>)}<th>%/sem</th></tr></thead>
-              <tbody>{PROVAS.map((p) => (
+              <thead><tr className="bg-slate-100"><th className="p-2 text-left">Prova</th><th>Unidade</th>{[1, 2, 3, 4, 5].map((n) => <th key={n}>{n} pt</th>)}<th>%/sem</th><th /></tr></thead>
+              <tbody>{c.provas.map((p, i) => (
                 <tr key={p.k} className="border-b">
-                  <td className="p-2">{p.nome}</td>
-                  {cfg.tabela[sexoTab][p.k].map((v, i) => (
-                    <td key={i} className="p-1"><input type="number" className="border rounded px-1 w-16" value={v} onChange={(e) => {
-                      const arr = [...cfg.tabela[sexoTab][p.k]]; arr[i] = Number(e.target.value);
-                      setCfg({ ...cfg, tabela: { ...cfg.tabela, [sexoTab]: { ...cfg.tabela[sexoTab], [p.k]: arr } } });
-                    }} /></td>
+                  <td className="p-1"><input className="border rounded px-1 w-36" value={p.nome} onChange={(e) => setP(i, { nome: e.target.value })} /></td>
+                  <td className="p-1"><input className="border rounded px-1 w-20" value={unid(p, sx)} onChange={(e) => setP(i, { [sx === "F" ? "unF" : "un"]: e.target.value })} /></td>
+                  {[0, 1, 2, 3, 4].map((n) => (
+                    <td key={n} className="p-1"><input type="number" className="border rounded px-1 w-16" value={p[sx]?.[n] ?? 0} onChange={(e) => setNivel(i, n, e.target.value)} /></td>
                   ))}
-                  <td className="p-1"><input type="number" step="0.5" className="border rounded px-1 w-16" value={cfg.taxas[p.k]} onChange={(e) => setCfg({ ...cfg, taxas: { ...cfg.taxas, [p.k]: Number(e.target.value) } })} /></td>
+                  <td className="p-1"><input type="number" step="0.5" className="border rounded px-1 w-14" value={p.taxa} onChange={(e) => setP(i, { taxa: Number(e.target.value) })} /></td>
+                  <td><button onClick={() => upd({ provas: c.provas.filter((_, j) => j !== i) })} className="text-red-600 text-xs">✕</button></td>
                 </tr>
               ))}</tbody>
             </table>
           </div>
-          <div className="mt-3 flex items-center gap-2 text-sm">
+          <button onClick={addProva} className="mt-2 border px-3 py-1 rounded-lg text-sm">+ Adicionar prova</button>
+          <div className="mt-4 flex flex-wrap items-center gap-2 text-sm">
             <label className="font-semibold">Fator de tempo (%):</label>
-            <input type="number" className="border rounded px-2 py-1 w-20" value={cfg.fator} onChange={(e) => setCfg({ ...cfg, fator: Number(e.target.value) || 1 })} />
-            <button onClick={salvarCfg} className={btn}>Salvar índices</button>
+            <input type="number" className="border rounded px-2 py-1 w-20" value={fator} onChange={(e) => setFator(Number(e.target.value) || 1)} />
+            <button onClick={salvar} className={btn}>Salvar {c.nome}</button>
+            <button onClick={excluir} className="text-red-600 ml-auto">Excluir concurso</button>
           </div>
           <p className="text-xs text-slate-500 mt-2">Aprovação exige ao menos 1 ponto em cada prova. Confira sempre o edital vigente.</p>
-        </Card>
+        </>
       )}
-    </Tela>
+    </Card>
   );
 }
