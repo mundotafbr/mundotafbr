@@ -264,12 +264,14 @@ function Painel({ aluno, inscr, avals, concursos, fator, admin, reload }) {
           {!inscr.length && <p className="text-sm text-slate-500">Nenhum concurso ainda. Adicione abaixo.</p>}
         </div>
         {disp.length > 0 && (
-          <div className="grid sm:grid-cols-3 gap-2 border-t pt-3">
-            <select className={inp} value={novo.concurso_id} onChange={(e) => setNovo({ ...novo, concurso_id: e.target.value })}>
-              <option value="">+ Adicionar concurso…</option>{disp.map((c) => <option key={c.id} value={c.id}>{c.nome}</option>)}
-            </select>
-            <input type="date" className={inp} title="Data da prova" value={novo.data_prova} onChange={(e) => setNovo({ ...novo, data_prova: e.target.value })} />
-            <button onClick={inscrever} className={btn}>Adicionar</button>
+          <div className="grid sm:grid-cols-3 gap-2 border-t pt-3 items-end">
+  <div><label className="text-xs text-slate-500">Concurso</label>
+    <select className={inp} value={novo.concurso_id} onChange={(e) => setNovo({ ...novo, concurso_id: e.target.value })}>
+      <option value="">+ Adicionar concurso…</option>{disp.map((c) => <option key={c.id} value={c.id}>{c.nome}</option>)}
+    </select></div>
+  <div><label className="text-xs text-slate-500">Data da prova</label>
+    <input type="date" className={inp} value={novo.data_prova} onChange={(e) => setNovo({ ...novo, data_prova: e.target.value })} /></div>
+  <button onClick={inscrever} className={btn}>Adicionar</button>
           </div>
         )}
         <Aviso msg={msg} />
