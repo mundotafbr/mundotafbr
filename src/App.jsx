@@ -290,7 +290,8 @@ function Painel({ aluno, inscr, avals, concursos, fator, admin, reload }) {
               <div className="mt-4 border-t pt-4 grid sm:grid-cols-2 gap-3">
                 <div><label className="text-sm">Data do teste</label><input type="date" className={inp} value={form.data} onChange={(e) => setForm({ ...form, data: e.target.value })} /></div>
                 {conc.provas.map((p) => (
-                  <div key={p.k}><label className="text-sm">{p.nome} ({unid(p, aluno.sexo)}) — mín. {p[aluno.sexo]?.[0]}</label>
+                  <div key={p.k}><label className="text-sm">{p.nome} ({unid(p, aluno.sexo)}) — {(p[aluno.sexo] || []).map((v, i) => `${i + 1}pt: ${v}`).join(" · ")}
+</label>
                     <input type="number" inputMode="decimal" className={inp} value={form.v[p.k] ?? ""} onChange={(e) => setForm({ ...form, v: { ...form.v, [p.k]: e.target.value } })} /></div>
                 ))}
                 <div className="flex gap-2 sm:col-span-2"><button onClick={salvarAval} className={btn}>Salvar</button><button onClick={() => setForm(null)} className="border px-4 rounded-lg">Cancelar</button></div>
